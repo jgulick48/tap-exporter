@@ -11,7 +11,7 @@ import (
 )
 
 func TestStderrConnectedTracking(t *testing.T) {
-	st := state.New(t.TempDir(), 180, nil)
+	st := state.New(t.TempDir(), 180, nil, nil)
 	for line, want := range map[string]bool{
 		"INFO Entering read loop":            true,
 		"WARN error opening source: refused": false,
@@ -39,7 +39,7 @@ func TestRunProcessesOutputAndStops(t *testing.T) {
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	st := state.New(dir, 180, nil)
+	st := state.New(dir, 180, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -72,7 +72,7 @@ func TestRunRestartsOnExit(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fail")
 	os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o755)
-	st := state.New(dir, 180, nil)
+	st := state.New(dir, 180, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { Run(ctx, st, Config{Binary: script, Host: "h", Port: 1, StateFile: "x"}); close(done) }()

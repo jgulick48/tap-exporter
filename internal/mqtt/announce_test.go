@@ -27,7 +27,7 @@ func pr(node int, ts float64) string {
 }
 
 func TestAnnounceAndPublish(t *testing.T) {
-	s := state.New(t.TempDir(), 180, nil)
+	s := state.New(t.TempDir(), 180, nil, nil)
 	s.Handle(pr(2, T0), T0)
 	f := &fakePub{map[string]string{}}
 	m := NewAnnouncer(f, "tigo", "homeassistant")
@@ -74,7 +74,7 @@ func TestAnnounceAndPublish(t *testing.T) {
 }
 
 func TestReannounceOnlyOnReset(t *testing.T) {
-	s := state.New(t.TempDir(), 180, nil)
+	s := state.New(t.TempDir(), 180, nil, nil)
 	s.Handle(pr(2, T0), T0)
 	f := &fakePub{map[string]string{}}
 	m := NewAnnouncer(f, "tigo", "homeassistant")
@@ -93,7 +93,7 @@ func TestReannounceOnlyOnReset(t *testing.T) {
 }
 
 func TestRenameReannounces(t *testing.T) {
-	s := state.New(t.TempDir(), 180, map[string]string{"X-1": "Roof"})
+	s := state.New(t.TempDir(), 180, map[string]string{"X-1": "Roof"}, nil)
 	s.Handle(pr(2, T0), T0)
 	f := &fakePub{map[string]string{}}
 	m := NewAnnouncer(f, "tigo", "homeassistant")
@@ -146,5 +146,69 @@ func TestTLSConfigServerName(t *testing.T) {
 	}
 	if (Config{Port: 1883}).UseTLS() {
 		t.Fatal("unexpected TLS")
+	}
+}
+
+func TestAnnounceGainAndOnline(t *testing.T) {
+	s := state.New(t.TempDir(), 180, nil, nil)
+	s.Handle(pr(2, T0), T0)
+	f := &fakePub{map[string]string{}}
+	m := NewAnnouncer(f, "tigo", "homeassistant")
+	snap := s.Snapshot(T0)
+	m.Announce(snap)
+	m.Publish(snap)
+
+	get := func(topic string) map[string]any {
+		t.Helper()
+		raw, ok := f.pub[topic]
+		if !ok {
+			t.Fatalf("%s not published", topic)
+		}
+		var v map[string]any
+		if err := json.Unmarshal([]byte(raw), &v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	b := get("homeassistant/binary_sensor/tigo_g4609n2_online/config")
+	for k, want := range map[string]any{
+		"name": "Online", "unique_id": "tigo_g4609n2_online", "object_id": "tigo_g4609n2_online",
+		"state_topic": "tigo/node/g4609n2", "value_template": "{{ 'ON' if value_json.online else 'OFF' }}",
+		"availability_topic": "tigo/status", "device_class": "connectivity", "entity_category": "diagnostic",
+	} {
+		if b[k] != want {
+			t.Errorf("binary_sensor %s = %v, want %v", k, b[k], want)
+		}
+	}
+	if b["device"].(map[string]any)["identifiers"].([]any)[0] != "tigo_g4609n2" {
+		t.Errorf("device %v", b["device"])
+	}
+	for _, c := range []struct {
+		topic, tmpl, unit, dclass, sclass string
+		prec                              float64
+	}{
+		{"tigo_array_gain_power", "{{ value_json.gain_power }}", "W", "power", "measurement", 0},
+		{"tigo_array_gain_energy", "{{ value_json.gain_energy_kwh }}", "kWh", "energy", "total_increasing", 2},
+		{"tigo_array_unoptimized_power", "{{ value_json.unoptimized_power }}", "W", "power", "measurement", 0},
+		{"tigo_g4609n2_gain_power", "{{ value_json.gain_power }}", "W", "power", "measurement", 0},
+		{"tigo_g4609n2_gain_energy", "{{ value_json.gain_energy_kwh }}", "kWh", "energy", "total_increasing", 3},
+	} {
+		cfg := get("homeassistant/sensor/" + c.topic + "/config")
+		if cfg["value_template"] != c.tmpl || cfg["unit_of_measurement"] != c.unit || cfg["device_class"] != c.dclass ||
+			cfg["state_class"] != c.sclass || cfg["suggested_display_precision"] != c.prec {
+			t.Errorf("%s: %v", c.topic, cfg)
+		}
+	}
+	if get("homeassistant/sensor/tigo_array_gain_power/config")["state_topic"] != "tigo/array" {
+		t.Error("array gain state topic")
+	}
+
+	node := get("tigo/node/g4609n2")
+	if node["gain_power"] != 0.0 || node["gain_energy_kwh"] != 0.0 || node["string"] != "all" {
+		t.Errorf("node payload %v", node)
+	}
+	arr := get("tigo/array")
+	if arr["unoptimized_power"] != 276.0 || arr["gain_power"] != 0.0 || arr["gain_energy_kwh"] != 0.0 {
+		t.Errorf("array payload %v", arr)
 	}
 }

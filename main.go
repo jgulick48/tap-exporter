@@ -10,6 +10,8 @@
 //	TAPTAP_HOST, TAPTAP_PORT (4196)   the adapter
 //	TAPTAP_BIN (taptap), STATE_DIR (/data)
 //	LISTEN_ADDRESS (:9812), NODE_TIMEOUT (180), NODE_NAMES, LOG_LEVEL (info)
+//	STRINGS (empty = one string "all")   series strings for the optimizer gain
+//	estimate: "Name=ID,ID;Name2=ID,..." where ID is a barcode or gateway/node
 //	MQTT_HOST (empty = MQTT off), MQTT_PORT (8883), MQTT_SERVER_NAME,
 //	MQTT_CA_FILE, MQTT_CERT_FILE, MQTT_KEY_FILE, MQTT_USER, MQTT_PASSWORD,
 //	MQTT_CLIENT_ID (tap-exporter), MQTT_TOPIC (tigo), DISCOVERY_PREFIX
@@ -107,7 +109,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	st := state.New(stateDir, timeout, state.ParseNames(os.Getenv("NODE_NAMES")))
+	st := state.New(stateDir, timeout, state.ParseNames(os.Getenv("NODE_NAMES")),
+		state.ParseStrings(os.Getenv("STRINGS")))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

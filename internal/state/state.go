@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -39,6 +40,34 @@ func ParseNames(spec string) map[string]string {
 	return out
 }
 
+// StringDef is one configured series string and the optimizer IDs (barcode or
+// "gateway/node" key) in it.
+type StringDef struct {
+	Name string
+	IDs  []string
+}
+
+// ParseStrings parses "Name=ID,ID;Name2=ID,...". Spaces are trimmed and empty
+// names or IDs skipped.
+func ParseStrings(spec string) []StringDef {
+	var out []StringDef
+	for _, part := range strings.Split(spec, ";") {
+		name, ids, ok := strings.Cut(part, "=")
+		name = strings.TrimSpace(name)
+		if !ok || name == "" {
+			continue
+		}
+		def := StringDef{Name: name}
+		for _, id := range strings.Split(ids, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				def.IDs = append(def.IDs, id)
+			}
+		}
+		out = append(out, def)
+	}
+	return out
+}
+
 // parseTS parses an ISO8601 timestamp to Unix seconds; ok is false when invalid.
 func parseTS(v any) (float64, bool) {
 	s, isStr := v.(string)
@@ -64,6 +93,8 @@ type node struct {
 	reports       int
 	energyWh      float64
 	power         float64
+	gain          float64 // estimated optimizer gain (W) at the last arrayUpdate
+	gainWh        float64
 }
 
 func (n *node) key() string { return fmt.Sprintf("%d/%d", n.gateway, n.node) }
@@ -85,18 +116,31 @@ type Gateway struct {
 
 // NodeSnap is one optimizer in a Snapshot.
 type NodeSnap struct {
-	Key      string             `json:"key"`
-	UID      string             `json:"uid"`
-	Gateway  int                `json:"gateway"`
-	Node     int                `json:"node"`
-	Barcode  *string            `json:"barcode"`
-	Name     string             `json:"name"`
-	Online   bool               `json:"online"`
-	Values   map[string]float64 `json:"values"`
-	Power    float64            `json:"power"`
-	EnergyWh float64            `json:"energy_wh"`
-	TS       float64            `json:"ts"`
-	Reports  int                `json:"reports"`
+	Key       string             `json:"key"`
+	UID       string             `json:"uid"`
+	Gateway   int                `json:"gateway"`
+	Node      int                `json:"node"`
+	Barcode   *string            `json:"barcode"`
+	Name      string             `json:"name"`
+	Online    bool               `json:"online"`
+	Values    map[string]float64 `json:"values"`
+	Power     float64            `json:"power"`
+	EnergyWh  float64            `json:"energy_wh"`
+	TS        float64            `json:"ts"`
+	Reports   int                `json:"reports"`
+	String    string             `json:"string"`
+	GainPower float64            `json:"gain_power"`
+	GainWh    float64            `json:"gain_wh"`
+}
+
+// StringSnap is one series string in a Snapshot.
+type StringSnap struct {
+	Name             string  `json:"name"`
+	Nodes            int     `json:"nodes"` // online optimizers
+	Power            float64 `json:"power"`
+	UnoptimizedPower float64 `json:"unoptimized_power"`
+	GainPower        float64 `json:"gain_power"`
+	StringCurrent    float64 `json:"string_current"`
 }
 
 // BarcodeOrEmpty returns the barcode or "".
@@ -109,17 +153,21 @@ func (n NodeSnap) BarcodeOrEmpty() string {
 
 // Snapshot is a consistent copy of the state, also served as /state.
 type Snapshot struct {
-	Now           float64            `json:"now"`
-	Nodes         []NodeSnap         `json:"nodes"`
-	ArrayPower    float64            `json:"array_power"`
-	ArrayEnergyWh float64            `json:"array_energy_wh"`
-	Online        int                `json:"online"`
-	Events        Events             `json:"events"`
-	LastEvent     float64            `json:"last_event"`
-	TaptapRunning bool               `json:"taptap_running"`
-	Connected     bool               `json:"connected"`
-	Restarts      int                `json:"restarts"`
-	Gateways      map[string]Gateway `json:"gateways"`
+	Now             float64            `json:"now"`
+	Nodes           []NodeSnap         `json:"nodes"`
+	ArrayPower      float64            `json:"array_power"`
+	ArrayEnergyWh   float64            `json:"array_energy_wh"`
+	ArrayUnoptPower float64            `json:"array_unoptimized_power"`
+	ArrayGainPower  float64            `json:"array_gain_power"`
+	ArrayGainWh     float64            `json:"array_gain_wh"`
+	Strings         []StringSnap       `json:"strings"`
+	Online          int                `json:"online"`
+	Events          Events             `json:"events"`
+	LastEvent       float64            `json:"last_event"`
+	TaptapRunning   bool               `json:"taptap_running"`
+	Connected       bool               `json:"connected"`
+	Restarts        int                `json:"restarts"`
+	Gateways        map[string]Gateway `json:"gateways"`
 }
 
 // State is everything known about the bus.
@@ -133,6 +181,9 @@ type State struct {
 	arrayEnergy float64
 	arrayPower  float64
 	arrayTS     float64
+	arrayGain   float64
+	arrayGainWh float64
+	strIDs      map[string]string // barcode or key -> string name
 	events      Events
 	lastEvent   float64
 	running     bool
@@ -142,7 +193,8 @@ type State struct {
 }
 
 // New creates a State and loads persisted energy counters from stateDir.
-func New(stateDir string, timeout float64, names map[string]string) *State {
+// strs configures the series strings used for the gain estimate (nil = one string "all").
+func New(stateDir string, timeout float64, names map[string]string, strs []StringDef) *State {
 	if names == nil {
 		names = map[string]string{}
 	}
@@ -152,6 +204,14 @@ func New(stateDir string, timeout float64, names map[string]string) *State {
 		timeout:    timeout,
 		names:      names,
 		energyFile: filepath.Join(stateDir, "energy.json"),
+		strIDs:     map[string]string{},
+	}
+	for _, def := range strs {
+		for _, id := range def.IDs {
+			if _, dup := s.strIDs[id]; !dup {
+				s.strIDs[id] = def.Name
+			}
+		}
 	}
 	s.loadEnergy()
 	return s
@@ -187,25 +247,32 @@ func (s *State) loadEnergy() {
 		return
 	}
 	var d struct {
-		ArrayWh float64            `json:"array_wh"`
-		Nodes   map[string]float64 `json:"nodes"`
+		ArrayWh     float64            `json:"array_wh"`
+		Nodes       map[string]float64 `json:"nodes"`
+		GainWh      float64            `json:"gain_wh"`
+		NodesGainWh map[string]float64 `json:"nodes_gain"`
 	}
 	if json.Unmarshal(b, &d) != nil {
 		return
 	}
 	s.arrayEnergy = d.ArrayWh
-	for key, wh := range d.Nodes {
-		gw, nd, ok := parseKey(key)
-		if !ok {
-			continue
+	s.arrayGainWh = d.GainWh
+	load := func(m map[string]float64, set func(n *node, wh float64)) {
+		for key, wh := range m {
+			gw, nd, ok := parseKey(key)
+			if !ok {
+				continue
+			}
+			n := s.nodes[key]
+			if n == nil {
+				n = &node{gateway: gw, node: nd, values: map[string]float64{}}
+				s.nodes[key] = n
+			}
+			set(n, wh)
 		}
-		n := s.nodes[key]
-		if n == nil {
-			n = &node{gateway: gw, node: nd, values: map[string]float64{}}
-			s.nodes[key] = n
-		}
-		n.energyWh = wh
 	}
+	load(d.Nodes, func(n *node, wh float64) { n.energyWh = wh })
+	load(d.NodesGainWh, func(n *node, wh float64) { n.gainWh = wh })
 }
 
 func parseKey(key string) (gw, nd int, ok bool) {
@@ -223,11 +290,14 @@ func parseKey(key string) (gw, nd int, ok bool) {
 func (s *State) SaveEnergy() error {
 	s.mu.Lock()
 	d := struct {
-		ArrayWh float64            `json:"array_wh"`
-		Nodes   map[string]float64 `json:"nodes"`
-	}{s.arrayEnergy, make(map[string]float64, len(s.nodes))}
+		ArrayWh     float64            `json:"array_wh"`
+		Nodes       map[string]float64 `json:"nodes"`
+		GainWh      float64            `json:"gain_wh"`
+		NodesGainWh map[string]float64 `json:"nodes_gain"`
+	}{s.arrayEnergy, make(map[string]float64, len(s.nodes)), s.arrayGainWh, make(map[string]float64, len(s.nodes))}
 	for k, n := range s.nodes {
 		d.Nodes[k] = n.energyWh
+		d.NodesGainWh[k] = n.gainWh
 	}
 	s.mu.Unlock()
 	b, err := json.Marshal(d)
@@ -408,18 +478,117 @@ func (s *State) infrastructure(ev map[string]any) {
 	}
 }
 
-// arrayUpdate: array power = sum of online optimizers; integrate it for array energy.
+// stringOf returns the name of the string an optimizer belongs to.
+func (s *State) stringOf(n *node) string {
+	if len(s.strIDs) == 0 {
+		return "all"
+	}
+	if n.barcode != "" {
+		if v, ok := s.strIDs[n.barcode]; ok {
+			return v
+		}
+	}
+	if v, ok := s.strIDs[n.key()]; ok {
+		return v
+	}
+	return "unassigned"
+}
+
+// gainResult is the gain estimate for one string.
+type gainResult struct {
+	nodes   int
+	power   float64 // sum of online output power
+	unopt   float64
+	gain    float64
+	current float64 // I*
+}
+
+// computeGain estimates the optimizer gain as of now. Per string, using the
+// online optimizers' latest MPP (V_i = voltage_in, I_i = current_in): without
+// optimizers one string current I flows, panels with I_i >= I give V_i*I and
+// the others are bypassed; the best I among the panels' currents is chosen
+// (ties prefer the larger current). Returns per-node gain (online nodes only,
+// keyed by node key) and per-string results.
+func (s *State) computeGain(now float64) (map[string]float64, map[string]*gainResult) {
+	type panel struct {
+		key   string
+		v, i  float64
+		power float64
+	}
+	groups := map[string][]panel{}
+	res := map[string]*gainResult{}
+	for _, n := range s.nodes {
+		name := s.stringOf(n)
+		if res[name] == nil {
+			res[name] = &gainResult{}
+		}
+		if !s.online(n, now) {
+			continue
+		}
+		groups[name] = append(groups[name], panel{n.key(), n.values["voltage_in"], n.values["current_in"], n.power})
+	}
+	gains := map[string]float64{}
+	for name, ps := range groups {
+		r := res[name]
+		r.nodes = len(ps)
+		best, bestI := 0.0, 0.0
+		for _, c := range ps {
+			r.power += c.power
+			if c.i <= 0 {
+				continue
+			}
+			sumV := 0.0
+			for _, p := range ps {
+				if p.i >= c.i {
+					sumV += p.v
+				}
+			}
+			if pw := c.i * sumV; pw > best || (pw == best && c.i > bestI) {
+				best, bestI = pw, c.i
+			}
+		}
+		r.unopt, r.current = best, bestI
+		for _, p := range ps {
+			unopt := 0.0
+			if bestI > 0 && p.i >= bestI {
+				unopt = p.v * bestI
+			}
+			g := math.Max(0, p.power-unopt)
+			gains[p.key] = g
+			r.gain += g
+		}
+	}
+	return gains, res
+}
+
+// arrayUpdate: array power = sum of online optimizers; integrate it (and the
+// estimated optimizer gain) for the energy counters.
 func (s *State) arrayUpdate(now float64) {
 	p := 0.0
 	for _, n := range s.nodes {
-		if n.ts != 0 && now-n.ts <= s.timeout {
+		if s.online(n, now) {
 			p += n.power
 		}
 	}
-	if s.arrayTS != 0 && now-s.arrayTS > 0 && now-s.arrayTS <= MaxIntegrationGap {
-		s.arrayEnergy += (s.arrayPower + p) / 2 * (now - s.arrayTS) / 3600.0
+	gains, strs := s.computeGain(now)
+	arrayGain := 0.0
+	for _, r := range strs {
+		arrayGain += r.gain
 	}
-	s.arrayPower, s.arrayTS = p, now
+	integrate := s.arrayTS != 0 && now-s.arrayTS > 0 && now-s.arrayTS <= MaxIntegrationGap
+	dt := now - s.arrayTS
+	if integrate {
+		s.arrayEnergy += (s.arrayPower + p) / 2 * dt / 3600.0
+		s.arrayGainWh += (s.arrayGain + arrayGain) / 2 * dt / 3600.0
+	}
+	for key, n := range s.nodes {
+		g := gains[key] // 0 when offline
+		if integrate {
+			n.gainWh += (n.gain + g) / 2 * dt / 3600.0
+		}
+		n.gain = g
+	}
+	s.arrayPower, s.arrayGain, s.arrayTS = p, arrayGain, now
 }
 
 // Tick is called periodically: lets the array power fall to 0 when reports stop.
@@ -447,6 +616,7 @@ func (s *State) Snapshot(now float64) Snapshot {
 		}
 		return all[i].node < all[j].node
 	})
+	gains, strs := s.computeGain(now)
 	snap := Snapshot{Now: now, Nodes: make([]NodeSnap, 0, len(all)), Gateways: map[string]Gateway{}}
 	for _, n := range all {
 		on := s.online(n, now)
@@ -454,6 +624,7 @@ func (s *State) Snapshot(now float64) Snapshot {
 			Key: n.key(), UID: n.uid(), Gateway: n.gateway, Node: n.node,
 			Name: s.nameOf(n), Online: on, Values: map[string]float64{},
 			EnergyWh: n.energyWh, TS: n.ts, Reports: n.reports,
+			String: s.stringOf(n), GainPower: gains[n.key()], GainWh: n.gainWh,
 		}
 		if n.barcode != "" {
 			bc := n.barcode
@@ -470,6 +641,15 @@ func (s *State) Snapshot(now float64) Snapshot {
 		snap.Nodes = append(snap.Nodes, ns)
 	}
 	snap.ArrayEnergyWh = s.arrayEnergy
+	snap.ArrayGainWh = s.arrayGainWh
+	snap.Strings = []StringSnap{}
+	for name, r := range strs {
+		snap.ArrayUnoptPower += r.unopt
+		snap.ArrayGainPower += r.gain
+		snap.Strings = append(snap.Strings, StringSnap{Name: name, Nodes: r.nodes, Power: r.power,
+			UnoptimizedPower: r.unopt, GainPower: r.gain, StringCurrent: r.current})
+	}
+	sort.Slice(snap.Strings, func(i, j int) bool { return snap.Strings[i].Name < snap.Strings[j].Name })
 	snap.Events = s.events
 	snap.LastEvent = s.lastEvent
 	snap.TaptapRunning, snap.Connected, snap.Restarts = s.running, s.connected, s.restarts
