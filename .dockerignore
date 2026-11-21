@@ -1,2 +1,6 @@
 *
-!tap_exporter.py
+!go.mod
+!go.sum
+!*.go
+!internal/
+!internal/**
