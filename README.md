@@ -38,10 +38,18 @@ where optimizer barcodes are learned (slowly, mostly at night).
 
 ## Build and test
 
+tap-exporter is written in Go (the `taptap` binary it supervises is built from Rust source
+in the image).
+
 ```sh
-python3 -m unittest -v test_tap_exporter
-docker buildx build --platform linux/amd64,linux/arm64 -t jgulick48/tap-exporter:$(date -u +%Y.%m.%d-%H%M) --push .
+make test          # go test ./...
+make docker.push   # build and push the multi-arch image, then tag the commit
 ```
+
+`make docker.push` pushes `docker.io/jgulick48/tap-exporter` with a UTC date tag
+(`YYYY.MM.DD-HHMM`, also `latest`) and then pushes a matching git tag to `origin`. It
+refuses to run with uncommitted changes to tracked files, so the image matches the tagged
+commit.
 
 CI (`.github/workflows/ci.yml`) runs the tests and builds the image on amd64 and arm64;
 it doesn't push.

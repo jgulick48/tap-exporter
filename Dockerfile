@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # taptap (github.com/litinoveweedle/taptap), built from source at a pinned commit.
 # Only the TCP source is used: serialport's libudev default (port listing) is turned off,
 # so it builds statically on musl. Cargo.lock still pins every other crate.
@@ -12,12 +13,19 @@ RUN sed -i 's/^serialport = { version = "4.4", optional = true }$/serialport = {
  && cargo build --release \
  && strip target/release/taptap
 
-FROM python:3.13-alpine3.22
-RUN pip install --no-cache-dir paho-mqtt==2.1.0 \
- && adduser -D -H -u 65532 tigo
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
+ARG TARGETOS TARGETARCH VERSION=dev COMMIT=unknown
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /out/tap-exporter .
+
+FROM alpine:3.22
+RUN adduser -D -H -u 65532 tigo
 COPY --from=taptap /src/target/release/taptap /usr/local/bin/taptap
-COPY tap_exporter.py /app/tap_exporter.py
+COPY --from=builder /out/tap-exporter /usr/local/bin/tap-exporter
 USER 65532
-ENV STATE_DIR=/data PYTHONUNBUFFERED=1
+ENV STATE_DIR=/data
 EXPOSE 9812
-ENTRYPOINT ["python3", "/app/tap_exporter.py"]
+ENTRYPOINT ["/usr/local/bin/tap-exporter"]
