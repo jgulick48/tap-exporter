@@ -104,6 +104,36 @@ func Render(s state.Snapshot) string {
 	line("tigo_array_power_watts %s", fmtG(s.ArrayPower))
 	head("tigo_array_energy_wh_total", "counter", "Array energy, integrated from the array power.")
 	line("tigo_array_energy_wh_total %s", fmtF3(s.ArrayEnergyWh))
+	head("tigo_optimizer_gain_watts", "gauge", "Estimated power gained by the optimizer versus no optimizers (online optimizers).")
+	for _, x := range s.Nodes {
+		if x.Online {
+			line("tigo_optimizer_gain_watts{%s} %s", labels(x), fmtG(x.GainPower))
+		}
+	}
+	head("tigo_optimizer_gain_wh_total", "counter", "Estimated energy gained by the optimizer versus no optimizers.")
+	for _, x := range s.Nodes {
+		line("tigo_optimizer_gain_wh_total{%s} %s", labels(x), fmtF3(x.GainWh))
+	}
+	head("tigo_array_unoptimized_power_watts", "gauge", "Estimated array power without optimizers.")
+	line("tigo_array_unoptimized_power_watts %s", fmtG(s.ArrayUnoptPower))
+	head("tigo_array_optimizer_gain_watts", "gauge", "Estimated array power gained by the optimizers.")
+	line("tigo_array_optimizer_gain_watts %s", fmtG(s.ArrayGainPower))
+	head("tigo_array_optimizer_gain_wh_total", "counter", "Estimated array energy gained by the optimizers.")
+	line("tigo_array_optimizer_gain_wh_total %s", fmtF3(s.ArrayGainWh))
+	for _, m := range []struct {
+		name, help string
+		val        func(state.StringSnap) float64
+	}{
+		{"tigo_string_power_watts", "Sum of the string's online optimizers' output power.", func(x state.StringSnap) float64 { return x.Power }},
+		{"tigo_string_unoptimized_power_watts", "Estimated string power without optimizers.", func(x state.StringSnap) float64 { return x.UnoptimizedPower }},
+		{"tigo_string_optimizer_gain_watts", "Estimated string power gained by the optimizers.", func(x state.StringSnap) float64 { return x.GainPower }},
+		{"tigo_string_current_amps", "Estimated string current without optimizers (best single current).", func(x state.StringSnap) float64 { return x.StringCurrent }},
+	} {
+		head(m.name, "gauge", m.help)
+		for _, x := range s.Strings {
+			line(`%s{string="%s"} %s`, m.name, escaper.Replace(x.Name), fmtG(m.val(x)))
+		}
+	}
 	head("tigo_nodes", "gauge", "Optimizers known / online.")
 	line(`tigo_nodes{state="known"} %d`, len(s.Nodes))
 	line(`tigo_nodes{state="online"} %d`, s.Online)

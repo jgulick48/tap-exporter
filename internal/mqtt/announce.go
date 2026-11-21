@@ -96,12 +96,17 @@ func toJSON(v any) string {
 }
 
 func (a *Announcer) sensor(uid, name, topic, tmpl string, dev device, unit, dclass, sclass string, prec *int, category string) {
+	a.entity("sensor", uid, name, topic, tmpl, dev, unit, dclass, sclass, prec, category)
+}
+
+// entity publishes a discovery config for a component ("sensor" or "binary_sensor").
+func (a *Announcer) entity(component, uid, name, topic, tmpl string, dev device, unit, dclass, sclass string, prec *int, category string) {
 	cfg := sensorConfig{
 		Name: name, UniqueID: uid, ObjectID: uid, StateTopic: topic, ValueTemplate: tmpl,
 		AvailabilityTopic: a.Avail, Device: dev, Unit: unit, DeviceClass: dclass, StateClass: sclass,
 		Precision: prec, EntityCategory: category,
 	}
-	a.Pub.Publish(fmt.Sprintf("%s/sensor/%s/config", a.Disc, uid), toJSON(cfg), 1, true)
+	a.Pub.Publish(fmt.Sprintf("%s/%s/%s/config", a.Disc, component, uid), toJSON(cfg), 1, true)
 }
 
 func ip(i int) *int { return &i }
@@ -115,6 +120,9 @@ func (a *Announcer) Announce(s state.Snapshot) {
 		dev := arrayDevice
 		a.sensor("tigo_array_power", "Power", t, "{{ value_json.power }}", dev, "W", "power", "measurement", ip(0), "")
 		a.sensor("tigo_array_energy", "Energy", t, "{{ value_json.energy_kwh }}", dev, "kWh", "energy", "total_increasing", ip(2), "")
+		a.sensor("tigo_array_gain_power", "Optimizer gain", t, "{{ value_json.gain_power }}", dev, "W", "power", "measurement", ip(0), "")
+		a.sensor("tigo_array_gain_energy", "Optimizer gain energy", t, "{{ value_json.gain_energy_kwh }}", dev, "kWh", "energy", "total_increasing", ip(2), "")
+		a.sensor("tigo_array_unoptimized_power", "Unoptimized power estimate", t, "{{ value_json.unoptimized_power }}", dev, "W", "power", "measurement", ip(0), "")
 		a.sensor("tigo_array_online", "Optimizers online", t, "{{ value_json.online }}", dev, "", "", "measurement", ip(0), "")
 		a.sensor("tigo_array_last_report", "Last report", t, "{{ value_json.last_report }}", dev, "", "timestamp", "", nil, "diagnostic")
 		a.annced["array"] = true
@@ -144,6 +152,9 @@ func (a *Announcer) Announce(s state.Snapshot) {
 			a.sensor(fmt.Sprintf("tigo_%s_%s", x.UID, sd.key), sd.name, t, tmpl, ndev, sd.unit, sd.dclass, sd.sclass, ip(sd.prec), category)
 		}
 		a.sensor(fmt.Sprintf("tigo_%s_energy", x.UID), "Energy", t, "{{ value_json.energy_kwh }}", ndev, "kWh", "energy", "total_increasing", ip(3), "")
+		a.sensor(fmt.Sprintf("tigo_%s_gain_power", x.UID), "Optimizer gain", t, "{{ value_json.gain_power }}", ndev, "W", "power", "measurement", ip(0), "")
+		a.sensor(fmt.Sprintf("tigo_%s_gain_energy", x.UID), "Optimizer gain energy", t, "{{ value_json.gain_energy_kwh }}", ndev, "kWh", "energy", "total_increasing", ip(3), "")
+		a.entity("binary_sensor", fmt.Sprintf("tigo_%s_online", x.UID), "Online", t, "{{ 'ON' if value_json.online else 'OFF' }}", ndev, "", "connectivity", "", nil, "diagnostic")
 		a.annced[sig] = true
 	}
 }
@@ -163,6 +174,9 @@ type arrayPayload struct {
 	Online     int     `json:"online"`
 	Known      int     `json:"known"`
 	LastReport *string `json:"last_report"`
+	UnoptPower float64 `json:"unoptimized_power"`
+	GainPower  float64 `json:"gain_power"`
+	GainKWh    float64 `json:"gain_energy_kwh"`
 }
 
 type nodePayload struct {
@@ -177,6 +191,9 @@ type nodePayload struct {
 	EnergyKWh  float64  `json:"energy_kwh"`
 	Online     bool     `json:"online"`
 	Barcode    *string  `json:"barcode"`
+	GainPower  float64  `json:"gain_power"`
+	GainKWh    float64  `json:"gain_energy_kwh"`
+	String     string   `json:"string"`
 }
 
 // isoLocal formats Unix seconds like Python's datetime.fromtimestamp(ts).astimezone().isoformat().
@@ -198,6 +215,7 @@ func (a *Announcer) Publish(s state.Snapshot) {
 	ap := arrayPayload{
 		Power: round(s.ArrayPower, 1), EnergyKWh: round(s.ArrayEnergyWh/1000, 4),
 		Online: s.Online, Known: len(s.Nodes),
+		UnoptPower: round(s.ArrayUnoptPower, 1), GainPower: round(s.ArrayGainPower, 1), GainKWh: round(s.ArrayGainWh/1000, 4),
 	}
 	if last != 0 {
 		l := isoLocal(last)
@@ -217,6 +235,7 @@ func (a *Announcer) Publish(s state.Snapshot) {
 			CurrentIn: get("current_in"), CurrentOut: get("current_out"), DutyCycle: get("duty_cycle"),
 			Temp: get("temperature"), RSSI: get("rssi"),
 			EnergyKWh: round(x.EnergyWh/1000, 5), Online: x.Online, Barcode: x.Barcode,
+			GainPower: round(x.GainPower, 1), GainKWh: round(x.GainWh/1000, 5), String: x.String,
 		}
 		a.Pub.Publish(a.Topic+"/node/"+x.UID, toJSON(np), 0, true)
 	}

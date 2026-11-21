@@ -24,7 +24,7 @@ func pr(node int, ts float64) string {
 }
 
 func TestMetricsRender(t *testing.T) {
-	s := state.New(t.TempDir(), 180, map[string]string{"4-A1B2C3D": "East 1", "4609/3": "West 3"})
+	s := state.New(t.TempDir(), 180, map[string]string{"4-A1B2C3D": "East 1", "4609/3": "West 3"}, nil)
 	s.Handle(pr(2, T0), T0)
 	txt := Render(s.Snapshot(T0))
 	for _, want := range []string{
@@ -71,7 +71,7 @@ func TestEscape(t *testing.T) {
 }
 
 func TestHandler(t *testing.T) {
-	s := state.New(t.TempDir(), 180, nil)
+	s := state.New(t.TempDir(), 180, nil, nil)
 	h := Handler(s)
 	get := func(path string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
@@ -95,5 +95,39 @@ func TestHandler(t *testing.T) {
 	}
 	if w := get("/"); w.Body.String() != "tap-exporter: /metrics /state /healthz\n" {
 		t.Fatal(w.Body)
+	}
+}
+
+func TestRenderGain(t *testing.T) {
+	s := state.New(t.TempDir(), 180, nil, state.ParseStrings(`S "1"=4609/1,4609/2`))
+	for i, cur := range []float64{8, 3} {
+		b, _ := json.Marshal(map[string]any{
+			"event_type": "power_report", "gateway": 4609, "node": i + 1,
+			"timestamp":  time.Unix(1_800_000_000, 0).UTC().Format(time.RFC3339),
+			"voltage_in": 35.0, "voltage_out": 35.0, "current": cur,
+			"dc_dc_duty_cycle": 1.0, "temperature": 12.3, "rssi": 150,
+		})
+		s.Handle(string(b), 1_800_000_000)
+	}
+	out := Render(s.Snapshot(1_800_000_000))
+	for _, want := range []string{
+		`tigo_optimizer_gain_watts{gateway="4609",node="2",barcode="",name="Node 4609/2"} 105`,
+		`tigo_optimizer_gain_watts{gateway="4609",node="1",barcode="",name="Node 4609/1"} 0`,
+		`tigo_optimizer_gain_wh_total{gateway="4609",node="2",barcode="",name="Node 4609/2"} 0.000`,
+		"# TYPE tigo_optimizer_gain_wh_total counter",
+		"tigo_array_unoptimized_power_watts 280",
+		"tigo_array_optimizer_gain_watts 105",
+		"tigo_array_optimizer_gain_wh_total 0.000",
+		`tigo_string_power_watts{string="S \"1\""} 385`,
+		`tigo_string_unoptimized_power_watts{string="S \"1\""} 280`,
+		`tigo_string_optimizer_gain_watts{string="S \"1\""} 105`,
+		`tigo_string_current_amps{string="S \"1\""} 8`,
+	} {
+		if !strings.Contains(out, want+"\n") {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if !strings.Contains(out, "Estimated") {
+		t.Error("HELP should say estimated")
 	}
 }
